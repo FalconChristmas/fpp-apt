@@ -1,0 +1,62 @@
+# FalconChristmas/fpp-apt — re-index + sign the pool, deploy to Pages.
+#
+# Runs whenever pool/ changes (a dependency's build workflow pushed a .deb).
+# Self-contained: apt-reindex.sh lives in this repo; no checkout of fpp. It
+# scans the committed pool (never rebuilds packages), signs, and deploys.
+#
+# Requires:
+#   - secret FPP_APT_GPG_PRIVATE_KEY: armored private signing key
+#   - Settings -> Pages -> Source = "GitHub Actions"
+name: reindex-and-publish
+
+on:
+  push:
+    paths: [ 'pool/**' ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: fpp-apt-pages
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - name: Checkout fpp-apt (has pool/ + apt-reindex.sh)
+        uses: actions/checkout@v4
+
+      - name: Install tooling
+        run: sudo apt-get update && sudo apt-get install -y apt-utils dpkg-dev gnupg
+
+      - name: Import signing key
+        run: |
+          echo "${{ secrets.FPP_APT_GPG_PRIVATE_KEY }}" | gpg --batch --import
+          KEYID=$(gpg --list-secret-keys --with-colons | awk -F: '/^sec/{print $5; exit}')
+          echo "KEYID=$KEYID" >> "$GITHUB_ENV"
+
+      - name: Re-index + sign
+        run: bash apt-reindex.sh --repo "$PWD" --gpg-key "$KEYID"
+
+      - name: Assemble Pages site (exclude .git)
+        run: |
+          mkdir -p _site
+          cp -r pool dists _site/
+          cp .nojekyll _site/ 2>/dev/null || true
+          gpg --export "$KEYID" > _site/fpp-archive-keyring.gpg
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      - name: Deploy to Pages
+        id: deploy
+        uses: actions/deploy-pages@v4
